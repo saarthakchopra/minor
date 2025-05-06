@@ -13,6 +13,8 @@ from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
 
+
+
 # --- File Paths ---
 authorlist_file = "authorlist.csv"
 output_file = "Example Outputs/ss_output_data.csv"
@@ -159,8 +161,18 @@ if st.session_state.authenticated:
         if not existing_row.empty:
             st.success("✅ Data found. Showing stored info.")
             row = existing_row.iloc[0]
-            with st.expander("📄 Basic Info"):
-                st.write(row.drop(labels=[col for col in ["Publications", "PDF Links"] if col in row]))
+            with st.expander("📄 Basic Info", expanded=True):
+                clean_row = row.drop(labels=[col for col in ["Publications", "PDF Links"] if col in row])
+                df_info = pd.DataFrame(clean_row.items(), columns=["Field", "Value"])
+
+                # Make dataframe fill width and enable horizontal scroll
+                st.dataframe(
+                    df_info,
+                    use_container_width=True,  # This makes the second column take full width
+                    hide_index=True  # Optional: cleaner without index
+                )
+
+                
 
             with st.expander("📚 Publications"):
                 pubs = [p.strip() for p in str(row.get("Publications", "")).split(";") if p.strip()]
@@ -182,8 +194,8 @@ if st.session_state.authenticated:
                 st.stop()
 
             try:
-                author_info = next(scholarly.search_author_id(gsid))
-                data_dict = scholarly.fill(author_info, sections=['basics', 'indices', 'publications', 'counts'])
+                author_info = scholarly.search_author_id(gsid)
+                data_dict = scholarly.fill(author_info, sections=['basics', 'indices', 'publications', 'counts', 'coauthors'])
                 pubs, pdf_links = [], []
 
                 for pub in data_dict['publications']:
@@ -193,7 +205,7 @@ if st.session_state.authenticated:
                     pubs.append(title)
                     pdf_links.append(pdf)
 
-                driver.quit()
+                coauthors = [co['name'] for co in data_dict.get("coauthors", [])]
 
                 profile_info = {
                     "Name on Profile": data_dict.get("name", ""),
@@ -203,12 +215,23 @@ if st.session_state.authenticated:
                     "i10-index": data_dict.get("i10index", ""),
                     "Affiliation": data_dict.get("affiliation", ""),
                     "Document Count": len(pubs),
+                    "Coauthors": ", ".join(coauthors),
                 }
 
                 st.success("✅ Data retrieved.")
 
-                with st.expander("📄 Basic Info"):
-                    st.write(profile_info)
+                with st.expander("📄 Basic Info", expanded=True):
+                    df_info = pd.DataFrame(profile_info.items(), columns=["Field", "Value"])
+
+                    # Make dataframe fill width and enable horizontal scroll
+                    st.dataframe(
+                        df_info,
+                        use_container_width=True,  # This makes the second column take full width
+                        hide_index=True  # Optional: cleaner without index
+                    )
+                    
+                    
+
 
                 with st.expander("📚 Publications"):
                     for i, pub in enumerate(pubs):
@@ -230,6 +253,7 @@ if st.session_state.authenticated:
                     "i10-index": profile_info["i10-index"],
                     "Affiliation": profile_info["Affiliation"],
                     "Document Count": profile_info["Document Count"],
+                    "Coauthors": profile_info["Coauthors"],
                     "Publications": "; ".join(pubs),
                     "PDF Links": "; ".join(pdf_links),
                 }
