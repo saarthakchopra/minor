@@ -12,6 +12,23 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
+from openai import OpenAI
+import openai
+from dotenv import load_dotenv
+
+# Load .env file
+load_dotenv()
+
+# Get API key from environment variable
+api_key = os.getenv("OPENAI_API_KEY")
+
+# Initialize client securely
+client = OpenAI(api_key=api_key)
+
+
+
+# Or for testing (not recommended for production)
+# openai.api_key = "your-openai-key"
 
 
 
@@ -102,9 +119,19 @@ def convert_dataframe_types(df):
             df[column] = df[column].fillna(False)
     return df
 
-# --- Streamlit App ---
-st.set_page_config(page_title="JIIT Faculty GS Viewer", layout="centered")
+def get_author_data_context(author_name, df):
+    row = df[df["Name"] == author_name]
+    if row.empty:
+        return ""
+    context = row.to_dict(orient="records")[0]
+    formatted = "\n".join([f"{k}: {v}" for k, v in context.items()])
+    return f"Author Data:\n{formatted}"
 
+
+# --- Streamlit App ---
+st.set_page_config(page_title="JIIT Faculty GS Viewer", layout="wide")
+
+# Authentication check
 if 'authenticated' not in st.session_state:
     st.session_state.authenticated = False
 
@@ -129,14 +156,19 @@ if not st.session_state.authenticated:
                 st.error("⚠️ Username already exists.")
 
 if st.session_state.authenticated:
+    # Load or initialize output_df
+    if os.path.exists(output_file):
+        output_df = pd.read_csv(output_file, sep='|')
+    else:
+        output_df = pd.DataFrame(columns=[
+            "Name", "Name on Profile", "Scholar ID", "Cited by", "h-index",
+            "i10-index", "Affiliation", "Document Count", "Publications", "PDF Links"
+        ])
+
     st.title("📚 EDU SCRAPE")
 
     authorlist_df = pd.read_csv(authorlist_file) if os.path.exists(authorlist_file) else pd.DataFrame(columns=["Name"])
     authors = authorlist_df["Name"].tolist()
-    output_df = pd.read_csv(output_file, sep='|') if os.path.exists(output_file) else pd.DataFrame()
-
-    if not output_df.empty and 'PDF Links' not in output_df.columns:
-        output_df['PDF Links'] = ""
 
     st.markdown("---")
     st.subheader("👤 Author Selection")
@@ -147,14 +179,42 @@ if st.session_state.authenticated:
     with col2:
         author_name = st.selectbox("Choose Author", options=authors) if mode == "Select Existing" else st.text_input("Enter New Author Name")
 
+    st.markdown("")
+
     col3, col4 = st.columns([1, 1])
     with col3:
         fetch_clicked = st.button("📥 Fetch / View Data")
     with col4:
         update_clicked = st.button("🔄 Update PDF Links")
 
-    st.markdown("---")
+    # Chatbot Section in Sidebar
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("❓ Ask a Question About the Author")
 
+    user_question = ""
+    if author_name:
+        user_question = st.sidebar.text_input("Ask a question (e.g., What is the h-index?)")
+
+    if st.sidebar.button("🔎 Get Answer") and user_question and author_name:
+        context = get_author_data_context(author_name, output_df)
+        prompt = f"{context}\n\nQuestion: {user_question}\nAnswer:"
+        with st.spinner("Thinking..."):
+            try:
+                response = client.chat.completions.create(
+                    model="gpt-3.5-turbo",
+                    messages=[
+                        {"role": "system", "content": "You are a helpful assistant that answers questions based on faculty publication data."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    max_tokens=300
+                )
+                answer = response.choices[0].message.content
+                st.sidebar.success("🧠 Answer:")
+                st.sidebar.markdown(answer)
+            except Exception as e:
+                st.sidebar.error(f"❌ Failed to get response: {e}")
+
+    # Fetch or update author data
     if fetch_clicked and author_name:
         existing_row = output_df[output_df["Name"] == author_name]
 
@@ -165,14 +225,12 @@ if st.session_state.authenticated:
                 clean_row = row.drop(labels=[col for col in ["Publications", "PDF Links"] if col in row])
                 df_info = pd.DataFrame(clean_row.items(), columns=["Field", "Value"])
 
-                # Make dataframe fill width and enable horizontal scroll
+                # Display data in table format
                 st.dataframe(
                     df_info,
-                    use_container_width=True,  # This makes the second column take full width
-                    hide_index=True  # Optional: cleaner without index
+                    use_container_width=True,
+                    hide_index=True
                 )
-
-                
 
             with st.expander("📚 Publications"):
                 pubs = [p.strip() for p in str(row.get("Publications", "")).split(";") if p.strip()]
@@ -223,15 +281,12 @@ if st.session_state.authenticated:
                 with st.expander("📄 Basic Info", expanded=True):
                     df_info = pd.DataFrame(profile_info.items(), columns=["Field", "Value"])
 
-                    # Make dataframe fill width and enable horizontal scroll
+                    # Display data in table format
                     st.dataframe(
                         df_info,
-                        use_container_width=True,  # This makes the second column take full width
-                        hide_index=True  # Optional: cleaner without index
+                        use_container_width=True,
+                        hide_index=True
                     )
-                    
-                    
-
 
                 with st.expander("📚 Publications"):
                     for i, pub in enumerate(pubs):
@@ -267,7 +322,9 @@ if st.session_state.authenticated:
                 driver.quit()
                 st.error(f"❌ Error fetching author info: {str(e)}")
 
-    if st.button("Update PDF Links") and author_name:
+    # Update PDF Links
+   
+    if update_clicked and author_name:
         st.info("Updating PDF links...")
     driver = get_driver()
     wait = WebDriverWait(driver, 10)
@@ -315,6 +372,7 @@ if st.session_state.authenticated:
         st.error(f"Error updating PDFs: {str(e)}")
 
 
+    # Option to download the full dataset
     if os.path.exists(output_file):
         with open(output_file, "rb") as f:
             st.download_button("📂 Download All Data", f, "faculty_data.csv", mime="text/csv")
