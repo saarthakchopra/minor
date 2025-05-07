@@ -37,10 +37,12 @@ client = OpenAI(api_key=api_key)
 
 
 
+
 # --- File Paths ---
 authorlist_file = "authorlist.csv"
 output_file = "Example Outputs/ss_output_data.csv"
 user_db_file = "user_db.csv"
+faculty_gsid_file = "faculty_gsid.csv"  # ✅ Add this line
 
 # --- Helper Functions ---
 def hash_password(password):
@@ -132,9 +134,33 @@ def get_author_data_context(author_name, df):
     formatted = "\n".join([f"{k}: {v}" for k, v in context.items()])
     return f"Author Data:\n{formatted}"
 
+def update_gsid_file(author_name, gsid):
+    # Check if the file exists
+    if os.path.exists("faculty_gsid.csv"):
+        gsid_df = pd.read_csv("faculty_gsid.csv")
+    else:
+        gsid_df = pd.DataFrame(columns=["Name", "GSID"])
+
+    # Check if the name already exists
+    existing_row = gsid_df[gsid_df["Name"] == author_name]
+
+    # If not found, append the new name and GSID
+    if existing_row.empty:
+        new_entry = pd.DataFrame([[author_name, gsid]], columns=["Name", "GSID"])
+        gsid_df = pd.concat([gsid_df, new_entry], ignore_index=True)
+    else:
+        # Update GSID if necessary (in case it changes)
+        gsid_df.loc[gsid_df["Name"] == author_name, "GSID"] = gsid
+
+    # Save the updated DataFrame back to the file
+    gsid_df.to_csv("faculty_gsid.csv", index=False)
+
+
 
 # --- Streamlit App ---
 st.set_page_config(page_title="JIIT Faculty GS Viewer", layout="wide")
+
+
 
 # Authentication check
 if 'authenticated' not in st.session_state:
@@ -167,7 +193,7 @@ if st.session_state.authenticated:
     else:
         output_df = pd.DataFrame(columns=[
             "Name", "Name on Profile", "Scholar ID", "Cited by", "h-index",
-            "i10-index", "Affiliation", "Document Count", "Publications", "PDF Links"
+            "i10-index", "Affiliation", "Document Count", "Coauthors", "Publications", "PDF Links"
         ])
 
     st.title("📚 EDU SCRAPE")
@@ -178,14 +204,36 @@ if st.session_state.authenticated:
     st.markdown("---")
     st.subheader("👤 Author Selection")
 
+    # Author mode and input type selection
     col1, col2 = st.columns(2)
     with col1:
         mode = st.radio("Mode", ["Select Existing", "Add New"])
     with col2:
-        author_name = st.selectbox("Choose Author", options=authors) if mode == "Select Existing" else st.text_input("Enter New Author Name")
+        input_type = st.radio("Search By", ["Name", "GSID"])
+        
+    select_existing = mode == "Select Existing"
+    add_user = mode == "Add New"
+
+
+    # Dynamic author input based on selection
+    if mode == "Select Existing":
+        if input_type == "Name":
+            author_name = st.selectbox("Choose Author by Name", options=authors)
+            input_gsid = ""
+        else:
+            input_gsid = st.text_input("Enter Scholar ID (GSID)")
+            author_name = ""
+    else:  # Add New
+        if input_type == "Name":
+            author_name = st.text_input("Enter New Author Name")
+            input_gsid = ""
+        else:
+            input_gsid = st.text_input("Enter Scholar ID (GSID)")
+            author_name = ""
 
     st.markdown("")
 
+    # Fetch/Update buttons
     col3, col4 = st.columns([1, 1])
     with col3:
         fetch_clicked = st.button("📥 Fetch / View Data")
@@ -218,163 +266,222 @@ if st.session_state.authenticated:
                 st.sidebar.markdown(answer)
             except Exception as e:
                 st.sidebar.error(f"❌ Failed to get response: {e}")
-
+    faculty_gsid_file = "faculty_gsid.csv"
+    try:
+        faculty_gsid_df = pd.read_csv(faculty_gsid_file)
+    except FileNotFoundError:
+        faculty_gsid_df = pd.DataFrame(columns=["Name", "GSID"])
     # Fetch or update author data
-    if fetch_clicked and author_name:
-        existing_row = output_df[output_df["Name"] == author_name]
+    if fetch_clicked and (author_name or input_gsid):
+        driver = get_driver()
+        wait = WebDriverWait(driver, 10)
 
-        if not existing_row.empty:
-            st.success("✅ Data found. Showing stored info.")
-            row = existing_row.iloc[0]
-            with st.expander("📄 Basic Info", expanded=True):
-                clean_row = row.drop(labels=[col for col in ["Publications", "PDF Links"] if col in row])
-                df_info = pd.DataFrame(clean_row.items(), columns=["Field", "Value"])
+        # Clean current dataframes
+        output_df["Name"] = output_df["Name"].astype(str).str.strip()
+        output_df["GSID"] = output_df["GSID"].astype(str).str.strip()
+        faculty_gsid_df["GSID"] = faculty_gsid_df["GSID"].astype(str).str.strip()
+        faculty_gsid_df["Name"] = faculty_gsid_df["Name"].astype(str).str.strip()
 
-                # Display data in table format
-                st.dataframe(
-                    df_info,
-                    use_container_width=True,
-                    hide_index=True
-                )
+        # -------------------
+        # SELECT EXISTING BY NAME
+        # -------------------
+        if select_existing and author_name:
+            author_name_clean = author_name.strip()
+            existing_row = output_df[output_df["Name"].str.strip().str.lower() == author_name_clean.lower()]
 
-            with st.expander("📚 Publications"):
-                pubs = [p.strip() for p in str(row.get("Publications", "")).split(";") if p.strip()]
-                pdfs = [p.strip() for p in str(row.get("PDF Links", "")).split(";") if p.strip()]
-                for i, pub in enumerate(pubs):
-                    if i < len(pdfs) and pdfs[i].startswith("http"):
-                        st.markdown(f"- [{pub}]({pdfs[i]}) 🔗")
-                    else:
-                        st.markdown(f"- {pub}")
-        else:
-            st.info("🔍 Scraping Google Scholar...")
-            driver = get_driver()
-            wait = WebDriverWait(driver, 10)
-            gsid = get_gsid_for_name(author_name, driver, wait)
+            if not existing_row.empty:
+                row = existing_row.iloc[0]
+                st.success("✅ Data found. Showing stored info.")
+                # Display data
+                with st.expander("📄 Basic Info", expanded=True):
+                    clean_row = row.drop(labels=[col for col in ["Publications", "PDF Links"] if col in row])
+                    st.dataframe(pd.DataFrame(clean_row.items(), columns=["Field", "Value"]), use_container_width=True, hide_index=True)
+                with st.expander("📚 Publications"):
+                    pubs = [p.strip() for p in str(row.get("Publications", "")).split(";") if p.strip()]
+                    pdfs = [p.strip() for p in str(row.get("PDF Links", "")).split(";") if p.strip()]
+                    for i, pub in enumerate(pubs):
+                        st.markdown(f"- [{pub}]({pdfs[i]}) 🔗" if i < len(pdfs) and pdfs[i].startswith("http") else f"- {pub}")
 
-            if gsid == "Not Found":
-                driver.quit()
-                st.error("❌ GSID not found or not a JIIT-affiliated author.")
+                # Update author list
+                if author_name_clean not in authors:
+                    authorlist_df = pd.concat([authorlist_df, pd.DataFrame([{"Name": author_name_clean}])], ignore_index=True)
+                    authorlist_df.to_csv(authorlist_file, index=False)
+            else:
+                st.error("❌ Author not found in stored data.")
                 st.stop()
 
-            try:
-                author_info = scholarly.search_author_id(gsid)
-                data_dict = scholarly.fill(author_info, sections=['basics', 'indices', 'publications', 'counts', 'coauthors'])
-                pubs, pdf_links = [], []
+        # -------------------
+        # SELECT EXISTING BY GSID
+        # -------------------
+        elif select_existing and input_gsid:
+            gsid = input_gsid.strip()
 
-                for pub in data_dict['publications']:
-                    title = pub['bib']['title'].replace("|", " ")
+            # Load GSID mapping
+            if os.path.exists(faculty_gsid_file):
+                faculty_gsid_df = pd.read_csv(faculty_gsid_file)
+            else:
+                st.error("❌ faculty_gsid.csv not found.")
+                st.stop()
+
+            # Find the author name for the provided GSID
+            gsid_row = faculty_gsid_df[faculty_gsid_df["GSID"].astype(str).str.strip() == gsid]
+
+            if not gsid_row.empty:
+                author_name = gsid_row["Name"].values[0].strip()
+
+                # Now fetch from output using the author's name (not GSID!)
+                existing_row = output_df[output_df["Name"].astype(str).str.strip() == author_name]
+
+                if not existing_row.empty:
+                    st.success("✅ Data found. Showing stored info.")
+                    row = existing_row.iloc[0]
+
+                    with st.expander("📄 Basic Info", expanded=True):
+                        clean_row = row.drop(labels=[col for col in ["Publications", "PDF Links"] if col in row])
+                        df_info = pd.DataFrame(clean_row.items(), columns=["Field", "Value"])
+                        st.dataframe(df_info, use_container_width=True, hide_index=True)
+
+                    with st.expander("📚 Publications"):
+                        pubs = [p.strip() for p in str(row.get("Publications", "")).split(";") if p.strip()]
+                        pdfs = [p.strip() for p in str(row.get("PDF Links", "")).split(";") if p.strip()]
+                        for i, pub in enumerate(pubs):
+                            if i < len(pdfs) and pdfs[i].startswith("http"):
+                                st.markdown(f"- [{pub}]({pdfs[i]}) 🔗")
+                            else:
+                                st.markdown(f"- {pub}")
+
+                    if author_name not in authors:
+                        authorlist_df = pd.concat([authorlist_df, pd.DataFrame([{"Name": author_name}])], ignore_index=True)
+                        authorlist_df.to_csv(authorlist_file, index=False)
+
+                else:
+                    st.error("❌ Author found in faculty_gsid.csv but missing in output file.")
+                    st.stop()
+            else:
+                st.error("❌ GSID not found in faculty_gsid.csv.")
+                st.stop()
+
+        # -------------------
+        # ADD NEW USER (BY NAME or GSID)
+        # -------------------
+        elif add_user and (author_name or input_gsid):
+            try:
+                gsid = input_gsid.strip() if input_gsid else ""
+                author_name = author_name.strip() if author_name else ""
+
+                st.info("🔍 Scraping Google Scholar for author...")
+                author_info = scholarly.search_author_id(gsid) if gsid else next(scholarly.search_author(author_name), None)
+                if not author_info:
+                    st.error("❌ No author found with the provided GSID or name.")
+                    st.stop()
+
+                author_data = scholarly.fill(author_info, sections=['basics', 'indices', 'publications', 'counts', 'coauthors'])
+
+                if 'scholar_id' not in author_data:
+                    st.error("❌ Scholar ID not found.")
+                    st.stop()
+
+                pubs, pdf_links = [], []
+                for pub in author_data.get('publications', []):
+                    title = pub['bib'].get('title', '').replace("|", " ")
                     pub_url = pub.get("pub_url", "")
                     pdf = extract_pdf_link(pub_url, driver) if pub_url else ""
                     pubs.append(title)
                     pdf_links.append(pdf)
 
-                coauthors = [co['name'] for co in data_dict.get("coauthors", [])]
+                coauthors = [co['name'] for co in author_data.get("coauthors", [])]
 
-                profile_info = {
-                    "Name on Profile": data_dict.get("name", ""),
-                    "Scholar ID": data_dict.get("scholar_id", ""),
-                    "Cited by": data_dict.get("citedby", ""),
-                    "h-index": data_dict.get("hindex", ""),
-                    "i10-index": data_dict.get("i10index", ""),
-                    "Affiliation": data_dict.get("affiliation", ""),
+                gsid = author_data["scholar_id"]
+                profile_name = author_data["name"]
+                new_row = {
+                    "Name": profile_name,
+                    "Name on Profile": profile_name,
+                    "GSID": gsid,
+                    "Scholar ID": gsid,
+                    "Cited by": author_data.get("citedby", ""),
+                    "h-index": author_data.get("hindex", ""),
+                    "i10-index": author_data.get("i10index", ""),
+                    "Affiliation": author_data.get("affiliation", ""),
                     "Document Count": len(pubs),
                     "Coauthors": ", ".join(coauthors),
-                }
-
-                st.success("✅ Data retrieved.")
-
-                with st.expander("📄 Basic Info", expanded=True):
-                    df_info = pd.DataFrame(profile_info.items(), columns=["Field", "Value"])
-
-                    # Display data in table format
-                    st.dataframe(
-                        df_info,
-                        use_container_width=True,
-                        hide_index=True
-                    )
-
-                with st.expander("📚 Publications"):
-                    for i, pub in enumerate(pubs):
-                        if i < len(pdf_links) and pdf_links[i].startswith("http"):
-                            st.markdown(f"- [{pub}]({pdf_links[i]}) 🔗")
-                        else:
-                            st.markdown(f"- {pub}")
-
-                if author_name not in authors:
-                    authorlist_df = pd.concat([authorlist_df, pd.DataFrame([{"Name": author_name}])], ignore_index=True)
-                    authorlist_df.to_csv(authorlist_file, index=False)
-
-                row = {
-                    "Name": author_name,
-                    "Name on Profile": profile_info["Name on Profile"],
-                    "Scholar ID": profile_info["Scholar ID"],
-                    "Cited by": profile_info["Cited by"],
-                    "h-index": profile_info["h-index"],
-                    "i10-index": profile_info["i10-index"],
-                    "Affiliation": profile_info["Affiliation"],
-                    "Document Count": profile_info["Document Count"],
-                    "Coauthors": profile_info["Coauthors"],
                     "Publications": "; ".join(pubs),
                     "PDF Links": "; ".join(pdf_links),
                 }
 
-                output_df = output_df[output_df["Name"] != author_name]
-                output_df = pd.concat([output_df, pd.DataFrame([row])], ignore_index=True)
+                output_df = output_df[output_df["GSID"] != gsid]
+                output_df = pd.concat([output_df, pd.DataFrame([new_row])], ignore_index=True)
                 output_df = convert_dataframe_types(output_df)
-                output_df.to_csv(output_file, sep='|', index=False)
-                st.success("📁 Data saved.")
+                output_df.to_csv(output_file, sep="|", index=False)
+
+                faculty_gsid_df = faculty_gsid_df[faculty_gsid_df["GSID"] != gsid]
+                faculty_gsid_df = pd.concat([faculty_gsid_df, pd.DataFrame([{"Name": profile_name, "GSID": gsid}])], ignore_index=True)
+                faculty_gsid_df.to_csv(faculty_gsid_file, index=False)
+
+                if profile_name not in authors:
+                    authorlist_df = pd.concat([authorlist_df, pd.DataFrame([{"Name": profile_name}])], ignore_index=True)
+                    authorlist_df.to_csv(authorlist_file, index=False)
+
+                st.success("✅ New author added successfully!")
+
             except Exception as e:
+                st.error(f"❌ Error adding new author: {str(e)}")
+            finally:
                 driver.quit()
-                st.error(f"❌ Error fetching author info: {str(e)}")
+
+
+                    
+
 
     # Update PDF Links
    
-    if update_clicked and author_name:
+    if update_clicked and (author_name or input_gsid):
+
         st.info("Updating PDF links...")
-    driver = get_driver()
-    wait = WebDriverWait(driver, 10)
-    try:
-        gsid = get_gsid_for_name(author_name, driver, wait)
-        if gsid == "Not Found":
-            driver.quit()
-            st.error("Scholar ID not found or author not affiliated.")
-            st.stop()
+        driver = get_driver()
+        wait = WebDriverWait(driver, 10)
+        try:
+            gsid = input_gsid.strip() if input_gsid else get_gsid_for_name(author_name, driver, wait)
 
-        profile_url = f"https://scholar.google.com/citations?user={gsid}&hl=en"
-        driver.get(profile_url)
-        time.sleep(2)
+            if gsid == "Not Found":
+                driver.quit()
+                st.error("Scholar ID not found or author not affiliated.")
+                st.stop()
 
-        pubs, pdf_links = [], []
-
-        # Find all publication links
-        pub_elements = driver.find_elements(By.CSS_SELECTOR, 'a.gsc_a_at')
-        pub_titles = [el.text for el in pub_elements]
-        pub_hrefs = [el.get_attribute("href") for el in pub_elements]
-
-        for i, pub_href in enumerate(pub_hrefs):
-            driver.get(pub_href)
+            profile_url = f"https://scholar.google.com/citations?user={gsid}&hl=en"
+            driver.get(profile_url)
             time.sleep(2)
 
-            soup = BeautifulSoup(driver.page_source, "html.parser")
-            pdf_url = ""
-            for a in soup.find_all("a", href=True):
-                if ".pdf" in a["href"].lower() and "[PDF]" in a.text:
-                    pdf_url = a["href"]
-                    break
+            pubs, pdf_links = [], []
 
-            pubs.append(pub_titles[i])
-            pdf_links.append(pdf_url)
+            # Find all publication links
+            pub_elements = driver.find_elements(By.CSS_SELECTOR, 'a.gsc_a_at')
+            pub_titles = [el.text for el in pub_elements]
+            pub_hrefs = [el.get_attribute("href") for el in pub_elements]
 
-        driver.quit()
+            for i, pub_href in enumerate(pub_hrefs):
+                driver.get(pub_href)
+                time.sleep(2)
 
-        output_df.loc[output_df["Name"] == author_name, "Publications"] = "; ".join(pubs)
-        output_df.loc[output_df["Name"] == author_name, "PDF Links"] = "; ".join(pdf_links)
-        output_df = convert_dataframe_types(output_df)
-        output_df.to_csv(output_file, sep='|', index=False)
-        st.success("PDF Links updated.")
-    except Exception as e:
-        driver.quit()
-        st.error(f"Error updating PDFs: {str(e)}")
+                soup = BeautifulSoup(driver.page_source, "html.parser")
+                pdf_url = ""
+                for a in soup.find_all("a", href=True):
+                    if ".pdf" in a["href"].lower() and "[PDF]" in a.text:
+                        pdf_url = a["href"]
+                        break
+
+                pubs.append(pub_titles[i])
+                pdf_links.append(pdf_url)
+
+            driver.quit()
+
+            output_df.loc[output_df["Name"] == author_name, "Publications"] = "; ".join(pubs)
+            output_df.loc[output_df["Name"] == author_name, "PDF Links"] = "; ".join(pdf_links)
+            output_df = convert_dataframe_types(output_df)
+            output_df.to_csv(output_file, sep='|', index=False)
+            st.success("PDF Links updated.")
+        except Exception as e:
+            driver.quit()
+            st.error(f"Error updating PDFs: {str(e)}")
 
 
     # Option to download the full dataset
