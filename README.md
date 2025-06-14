@@ -1,5 +1,5 @@
 # minorproject2
-This project is made for making a website using MERN and also to make an Gen AI LLM model to make task of getting data of faculties of a college from online available websites (like google scholar) easier so that one does not have to use google forms and save data manually into excel sheets and this will be interactive and we are going to try this first for at least 20 teachers.
+This project is made for making a website using streamlit and also to make an Gen AI LLM model to make task of getting data of faculties of a college from online available websites (like google scholar) easier so that one does not have to use google forms and save data manually into excel sheets and this will be interactive and we are going to try this first for at least 20 teachers.
 
 works to do : 
 
